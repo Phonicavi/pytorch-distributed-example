@@ -1,7 +1,8 @@
 from __future__ import division, print_function
 
 import argparse
-
+import sys
+import time
 import torch
 import torch.nn.functional as F
 from torch import distributed, nn
@@ -101,7 +102,7 @@ class Trainer(object):
         for p in self.net.parameters():
             group = distributed.new_group(ranks=list(range(world_size)))
 
-            tensor = p.grad.data.cpu()
+            tensor = p.grad.data.cuda()
 
             distributed.all_reduce(
                 tensor, op=distributed.reduce_op.SUM, group=group)
@@ -128,7 +129,7 @@ def get_dataloader(root, batch_size):
     ])
 
     train_set = datasets.MNIST(
-        root, train=True, transform=transform, download=True)
+        root, train=True, transform=transform, download=False)
     sampler = DistributedSampler(train_set)
 
     train_loader = data.DataLoader(
@@ -138,7 +139,7 @@ def get_dataloader(root, batch_size):
         sampler=sampler)
 
     test_loader = data.DataLoader(
-        datasets.MNIST(root, train=False, transform=transform, download=True),
+        datasets.MNIST(root, train=False, transform=transform, download=False),
         batch_size=batch_size,
         shuffle=False)
 
@@ -155,15 +156,17 @@ def solve(args):
     train_loader, test_loader = get_dataloader(args.root, args.batch_size)
 
     trainer = Trainer(net, optimizer, train_loader, test_loader, device)
-
+    timer = time.time()
     for epoch in range(1, args.epochs + 1):
+        iter_timer = time.time()
         train_loss, train_acc = trainer.train()
         test_loss, test_acc = trainer.evaluate()
-
         print(
             'Epoch: {}/{},'.format(epoch, args.epochs),
-            'train loss: {:.6f}, train acc: {:.6f}, test loss: {:.6f}, test acc: {:.6f}.'.
-            format(train_loss, train_acc, test_loss, test_acc))
+            'train loss: {:.6f}, train acc: {:.6f}, test loss: {:.6f}, test acc: {:.6f} => {:.2f}ms'.
+            format(train_loss, train_acc, test_loss, test_acc, time.time() - iter_timer))
+        sys.stdout.flush()
+    print('Total cost: %.2fms' % (time.time() - timer))
 
 
 def init_process(args):
@@ -194,13 +197,20 @@ def main():
         '-s',
         type=int,
         help='Number of processes participating in the job.')
-    parser.add_argument('--epochs', type=int, default=20)
+
+    parser.add_argument('--ip', type=str, default='127.0.0.1')
+    parser.add_argument('--port', type=str, default='20000')
+
+    parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--no-cuda', action='store_true')
     parser.add_argument('--learning-rate', '-lr', type=float, default=1e-3)
     parser.add_argument('--root', type=str, default='data')
     parser.add_argument('--batch-size', type=int, default=128)
     args = parser.parse_args()
     args.cuda = torch.cuda.is_available() and not args.no_cuda
+    args.init_method = '{}://{}:{}'.format(args.backend, args.ip, args.port)
+    #args.init_method = 'file:///mnt/lustre/share/qiufeng/sharedfile/mnist'
+    #args.backend = 'nccl'
     print(args)
 
     init_process(args)
